@@ -201,6 +201,29 @@ def is_adk_shortcut(agent_spec: str) -> bool:
     return agent_spec.startswith(ADK_SHORTCUT_PREFIX)
 
 
+def _safe_template_relpath(template_path: str) -> str:
+    """Return a repository-relative template path, rejecting escapes."""
+    template_path = template_path.strip()
+    if not template_path:
+        return ""
+    if any(char in template_path for char in ("\\", "\x00", "\r", "\n")):
+        raise RuntimeError(f"Invalid template path: {template_path!r}")
+    posix_path = pathlib.PurePosixPath(template_path)
+    windows_path = pathlib.PureWindowsPath(template_path)
+    if (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    ):
+        raise RuntimeError(
+            "Invalid template path (must stay inside the repository): "
+            f"{template_path!r}"
+        )
+    return template_path
+
+
 def check_and_execute_with_version_lock(
     template_dir: pathlib.Path,
     original_agent_spec: str | None = None,
@@ -338,10 +361,17 @@ def fetch_remote_template(
 
     # Process the successfully fetched template
     try:
-        if spec.template_path:
-            template_dir = repo_path / spec.template_path
-        else:
-            template_dir = repo_path
+        repo_root = repo_path.resolve()
+        template_path = _safe_template_relpath(spec.template_path)
+        template_dir = (
+            (repo_root / template_path).resolve() if template_path else repo_root
+        )
+        try:
+            template_dir.relative_to(repo_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Template path escapes the cloned repository: {spec.template_path}"
+            ) from exc
 
         if not template_dir.exists():
             raise FileNotFoundError(

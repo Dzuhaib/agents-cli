@@ -193,9 +193,10 @@ def stop_server(project_root: Path, pid: int | None = None) -> bool:
         return False
     if pid is not None and info.get("pid") != pid:
         return False
-    _cleanup(project_root, info)
-    click.secho("Local server stopped.", dim=True)
-    return True
+    stopped = _cleanup(project_root, info)
+    if stopped:
+        click.secho("Local server stopped.", dim=True)
+    return stopped
 
 
 def get_server_port(project_root: Path) -> int | None:
@@ -503,9 +504,18 @@ def _read_pid_file(project_root: Path) -> dict | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return None
+    if not isinstance(data, dict):
+        return None
+    pid = data.get("pid")
+    port = data.get("port")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        return None
+    return data
 
 
 def _write_pid_file(
@@ -564,10 +574,34 @@ def _is_server_alive(pid: int, port: int) -> bool:
         return False
 
 
-def _cleanup(project_root: Path, info: dict) -> None:
-    """Terminate the server process and remove the PID file."""
+def _is_owned_server_process(pid: int, port: object, project_root: Path) -> bool:
+    """Return True only for a live server process belonging to this project."""
+    if pid == os.getpid():
+        return False
+    try:
+        process = psutil.Process(pid)
+        if Path(process.cwd()).resolve() != project_root.resolve():
+            return False
+        cmdline = " ".join(process.cmdline()).lower()
+    except (psutil.Error, OSError):
+        return False
+    port_text = str(port)
+    if port_text not in cmdline:
+        return False
+    markers = ("adk", "api_server", "uvicorn", "fast_api_app", "web")
+    return any(marker in cmdline for marker in markers)
+
+
+def _cleanup(project_root: Path, info: dict) -> bool:
+    """Terminate the server process and remove the PID file.
+
+    Returns True only when the recorded process was verified as this project's
+    local server and was terminated. A PID file can be supplied by a cloned
+    repository, so never terminate an arbitrary PID from it.
+    """
     pid = info.get("pid")
-    if pid:
+    stopped = False
+    if pid and _is_owned_server_process(pid, info.get("port"), project_root):
         try:
             parent = psutil.Process(pid)
             children = parent.children(recursive=True)
@@ -578,12 +612,20 @@ def _cleanup(project_root: Path, info: dict) -> None:
                     pass
             parent.terminate()
             psutil.wait_procs([*children, parent], timeout=3)
+            stopped = True
         except psutil.NoSuchProcess:
             logging.warning(
                 "Local server process with PID %d not found, skipping termination.", pid
             )
+    elif pid:
+        logging.warning(
+            "Refusing to stop PID %s: it does not look like this project's "
+            "local server.",
+            pid,
+        )
     path = _pid_file_path(project_root)
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
         logging.warning("Failed to remove PID file %s: %s", path, exc)
+    return stopped

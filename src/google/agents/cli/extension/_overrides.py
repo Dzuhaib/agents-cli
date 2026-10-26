@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,35 @@ from google.agents.cli.extension._spec import ExtensionCommand
 
 if TYPE_CHECKING:
     from google.agents.cli.extension._loader import ResolvedCommand
+
+PROJECT_EXTENSION_TRUST_ENV = "AGENTS_CLI_TRUST_PROJECT_EXTENSIONS"
+
+
+def require_project_extension_trust(
+    *, scope: str, extension_name: str, display_path: str
+) -> None:
+    """Require explicit consent before running project-scope extension code.
+
+    A project-root ``agents-cli-extension.yaml`` (or a checked-in ``extensions/``
+    tree) is controlled by whoever authored the repository. Unlike an extension
+    installed with ``extension add``, it has never passed the install trust prompt.
+    """
+    if scope != "project" or os.environ.get(PROJECT_EXTENSION_TRUST_ENV) == "1":
+        return
+    message = (
+        f"Project-scope extension '{extension_name}' defines {display_path!r}. "
+        "Extensions can run arbitrary code."
+    )
+    if not sys.stdin.isatty():
+        raise click.ClickException(
+            f"{message}\n"
+            f"  Refusing to run it non-interactively. Set "
+            f"{PROJECT_EXTENSION_TRUST_ENV}=1 to trust project extensions, or "
+            "run 'agents-cli extension add' and use user scope."
+        )
+    click.secho(message, fg="yellow", err=True)
+    if not click.confirm("  Trust and run it?", default=False):
+        raise click.Abort()
 
 
 def installed_override(dotted: str) -> ResolvedCommand | None:
@@ -62,6 +92,11 @@ def run_override(
     resolved: ResolvedCommand, argv: list[str], *, display_path: str
 ) -> None:
     """Run a resolved override's vector, exiting with its code on failure."""
+    require_project_extension_trust(
+        scope=resolved.scope,
+        extension_name=resolved.extension_name,
+        display_path=display_path,
+    )
     if resolved.contribution.kind == "override":
         click.echo(
             f"running {display_path!r} via extension {resolved.extension_name!r} ({resolved.scope} scope)",
@@ -182,6 +217,11 @@ def make_override_command(
     )
     @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
     def _cmd(extra_args: tuple[str, ...]) -> None:
+        require_project_extension_trust(
+            scope=scope,
+            extension_name=extension_name,
+            display_path=display_path,
+        )
         if contribution.kind == "override":
             click.echo(
                 f"running {display_path!r} via extension {extension_name!r} ({scope} scope)",

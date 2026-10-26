@@ -661,7 +661,7 @@ def deploy_agent_runtime(
         if runtime_env_vars:
             click.echo("\n🌍 Environment Variables:")
             for key, value in sorted(runtime_env_vars.items()):
-                click.echo(f"  {key}: {format_env_value(value)}")
+                click.echo(f"  {key}: {format_env_value(value, key=key)}")
 
         # Setup agent identity on first deployment (remote identity creation pre-step)
         if agent_identity and not matching_agents:
@@ -1322,11 +1322,35 @@ def _create_api_config(
     return api_config
 
 
-def format_env_value(value: Any) -> str:
-    """Format an env var value for display, masking secrets."""
+_PUBLIC_RUNTIME_ENV_KEYS = frozenset(
+    {
+        "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS",
+        "AGENT_VERSION",
+        "APP_URL",
+        "ENVIRONMENT",
+        "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY",
+        "GOOGLE_CLOUD_LOCATION",
+        "GOOGLE_GENAI_USE_ENTERPRISE",
+        "GOOGLE_GENAI_USE_VERTEXAI",
+        "LOG_LEVEL",
+        "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
+        "PORT",
+    }
+)
+
+
+def format_env_value(value: Any, *, key: str = "") -> str:
+    """Format an env var value for display without exposing plain secrets.
+
+    Values loaded from a project ``.env`` are indistinguishable from explicit
+    flags by the time they reach the summary, so only known non-secret runtime
+    settings are shown. Everything else is redacted.
+    """
     if isinstance(value, dict) and "secret" in value and "version" in value:
         return f"[secret:{value['secret']}:{value['version']}]"
-    return str(value)
+    if key in _PUBLIC_RUNTIME_ENV_KEYS:
+        return str(value)
+    return "[redacted]"
 
 
 def setup_agent_identity(

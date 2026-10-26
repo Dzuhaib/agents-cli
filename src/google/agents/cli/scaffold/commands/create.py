@@ -414,6 +414,52 @@ def _validate_project_name(project_name: str) -> list[str]:
             f"Project name '{project_name}' exceeds 26 characters. "
             "Please use a shorter name."
         )
+    if not project_name.strip():
+        errors.append("Project name cannot be empty.")
+        return errors
+    if any(char in project_name for char in ("/", "\\", "\x00", "\r", "\n")):
+        errors.append(
+            f"Project name '{project_name}' cannot contain path separators or "
+            "control characters."
+        )
+        return errors
+    if project_name.strip() in {".", ".."}:
+        errors.append(
+            f"Project name '{project_name}' must name a new directory inside the "
+            "output directory."
+        )
+        return errors
+    posix_path = pathlib.PurePosixPath(project_name)
+    windows_path = pathlib.PureWindowsPath(project_name)
+    if (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    ):
+        errors.append(
+            f"Project name '{project_name}' must be a relative name inside the "
+            "output directory."
+        )
+        return errors
+    if any(char in project_name for char in '<>:"|?*'):
+        errors.append(
+            f"Project name '{project_name}' contains characters that are not "
+            "portable across filesystems."
+        )
+    windows_stem = windows_path.name.split(".", 1)[0].upper()
+    if windows_stem in {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }:
+        errors.append(
+            f"Project name '{project_name}' is a reserved Windows device name."
+        )
     return errors
 
 

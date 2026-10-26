@@ -26,10 +26,11 @@ FIRST_PARTY_REPO = "google/agents-cli"
 # Schemes an extension may be cloned from: the set `--agent` already accepts for
 # a template repo (scaffold/utils/remote_template.py), plus ssh://, which is how
 # a self-hosted host is usually reached, and file://, for a bare repo on a shared
-# mount — `local@` copies a working tree and cannot pin a commit against one.
-# `git://` is left out deliberately: it is unauthenticated, and an extension's
-# commands run arbitrary code on the machine that installs it.
-GIT_URL_SCHEMES = ("https", "http", "ssh", "file")
+# mount �?" `local@` copies a working tree and cannot pin a commit against one.
+# `git://` and plain `http://` are left out deliberately: both are
+# unauthenticated, and an extension's commands run arbitrary code on the machine
+# that installs it.
+GIT_URL_SCHEMES = ("https", "ssh", "file")
 
 _SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://")
 # scp-style, as offered by most hosts' "clone with SSH" button: git@host:org/repo.
