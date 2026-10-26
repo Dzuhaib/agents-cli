@@ -33,16 +33,73 @@ from google.agents.cli.auth import get_access_token, get_id_token
 _AGENT_ENGINE_URL_FRAGMENT = "aiplatform.googleapis.com"
 _REASONING_ENGINE_PATH = "reasoningEngines"
 # A valid Agent Runtime host carries a location prefix: <location>-aiplatform.googleapis.com
-_AGENT_RUNTIME_HOST_RE = re.compile(rf".+-{re.escape(_AGENT_ENGINE_URL_FRAGMENT)}$")
+_AGENT_RUNTIME_HOST_RE = re.compile(
+    rf"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-{re.escape(_AGENT_ENGINE_URL_FRAGMENT)}"
+)
 
 # WebSocket traffic has its own ingress; HTTP goes through reasoningEngines/v1.
 # https://github.com/GoogleCloudPlatform/generative-ai/blob/main/agents/agent_engine/tutorial_bidi_stream_v2.ipynb
 _AGENT_RUNTIME_WS_INGRESS = "reasoningEngines/ws/internal"
 
+# urllib.parse treats a backslash before "@" as userinfo, while requests /
+# urllib3 percent-encode it and connect to the host before it. Reject the
+# ambiguous characters rather than trying to emulate both parsers.
+_UNSAFE_URL_CHARS = ("\\", "\x00", "\r", "\n")
+_UNSAFE_NETLOC_CHARS = ("@", "\\", "%")
+
+
+def _parse_remote_url(url: str):
+    """Parse an HTTP(S) URL and reject ambiguous or credential-bearing forms."""
+    if not url:
+        raise click.UsageError("A remote URL is required.")
+    if any(char in url for char in _UNSAFE_URL_CHARS) or any(
+        char.isspace() for char in url
+    ):
+        raise click.UsageError(
+            "Invalid remote URL: backslashes, whitespace, and control "
+            "characters are not allowed."
+        )
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError as exc:
+        raise click.UsageError("Invalid remote URL: malformed URL.") from exc
+    if parts.scheme not in ("http", "https"):
+        raise click.UsageError(
+            "Invalid remote URL: only http:// and https:// URLs are supported."
+        )
+    if not hostname:
+        raise click.UsageError("Invalid remote URL: missing host.")
+    if any(char in parts.netloc for char in _UNSAFE_NETLOC_CHARS):
+        raise click.UsageError(
+            "Invalid remote URL: credentials and percent-encoded hosts are "
+            "not supported."
+        )
+    try:
+        parts.port
+    except ValueError as exc:
+        raise click.UsageError("Invalid remote URL: invalid port.") from exc
+    return parts
+
+
+def _has_path_segment(parts, segment: str) -> bool:
+    return segment in parts.path.split("/")
+
 
 def is_agent_runtime_url(url: str) -> bool:
     """Return ``True`` if *url* points to an Agent Runtime endpoint."""
-    return _AGENT_ENGINE_URL_FRAGMENT in url and _REASONING_ENGINE_PATH in url
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return False
+    if any(char in url for char in _UNSAFE_URL_CHARS) or any(
+        char in parts.netloc for char in _UNSAFE_NETLOC_CHARS
+    ):
+        return False
+    return bool(_AGENT_RUNTIME_HOST_RE.fullmatch(host)) and _has_path_segment(
+        parts, _REASONING_ENGINE_PATH
+    )
 
 
 def is_legacy_agent_runtime_url(url: str) -> bool:
@@ -54,20 +111,25 @@ def is_legacy_agent_runtime_url(url: str) -> bool:
     A URL already containing ``/api`` (the deployed APP_URL form served by the
     container) or any non-Agent-Runtime URL returns ``False``.
     """
-    return is_agent_runtime_url(url) and "/api" not in url
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return False
+    return is_agent_runtime_url(url) and "/api" not in path
 
 
 def validate_agent_runtime_url(url: str) -> None:
-    """Raise a helpful hint when *url* references an Agent Runtime resource but
-    its host is missing the required ``<location>-`` location prefix.
+    """Validate a remote URL before credentials are attached.
 
-    Agent Runtime endpoints are hosted at ``<location>-aiplatform.googleapis.com``.
-    A bare resource path (no host) or a host without the location prefix can't be
-    queried, so we point at the correct format instead of failing obscurely.
+    This rejects URL forms that ``urllib.parse`` and ``requests`` interpret
+    differently (notably ``\\@``), then verifies that Agent Runtime URLs use
+    the required ``<location>-aiplatform.googleapis.com`` host over HTTPS.
     """
-    if _REASONING_ENGINE_PATH not in url:
+    parts = _parse_remote_url(url)
+    if not _has_path_segment(parts, _REASONING_ENGINE_PATH):
         return
-    if _AGENT_RUNTIME_HOST_RE.match(urlparse(url).hostname or ""):
+    host = (parts.hostname or "").lower()
+    if parts.scheme == "https" and _AGENT_RUNTIME_HOST_RE.fullmatch(host):
         return  # Host already carries a <location>- prefix.
     raise click.UsageError(
         "Detected an Agent Runtime URL with a missing location.\n"
@@ -162,18 +224,25 @@ def build_remote_headers(
     """
     headers: dict[str, str] = {"Content-Type": "application/json"}
     parsed = dict(_parse_header(h) for h in custom_headers)
+    parts = _parse_remote_url(url) if url else None
 
     if "Authorization" not in parsed and not _is_loopback_url(url):
-        try:
-            if is_agent_runtime_url(url):
-                token = get_access_token()
-            else:
-                parsed_url = urlparse(url)
-                audience = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                token = get_id_token(audience)
-            headers["Authorization"] = f"Bearer {token}"
-        except Exception as exc:
-            logging.warning("Could not obtain credentials: %s", exc)
+        if parts is not None and parts.scheme != "https":
+            logging.warning(
+                "Refusing to send Google credentials over insecure URL: %s", url
+            )
+        else:
+            try:
+                if parts is not None and is_agent_runtime_url(url):
+                    token = get_access_token()
+                else:
+                    audience = (
+                        f"{parts.scheme}://{parts.netloc}" if parts is not None else ""
+                    )
+                    token = get_id_token(audience)
+                headers["Authorization"] = f"Bearer {token}"
+            except Exception as exc:
+                logging.warning("Could not obtain credentials: %s", exc)
 
     headers.update(parsed)
     return headers
